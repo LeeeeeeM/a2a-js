@@ -55,7 +55,7 @@ import { PushNotificationSender } from '../push_notification/push_notification_s
 import { DefaultPushNotificationSender } from '../push_notification/default_push_notification_sender.js';
 import { ServerCallContext } from '../context.js';
 import { DEFAULT_PAGE_SIZE } from '../../constants.js';
-import { TERMINAL_STATE_LIST } from '../utils.js';
+import { TERMINAL_STATE_LIST, isTask } from '../utils.js';
 
 /**
  * Default implementation of the A2A request handler.
@@ -233,7 +233,7 @@ export class DefaultRequestHandler implements A2ARequestHandler {
     eventQueue: ExecutionEventQueue,
     context: ServerCallContext,
     options?: {
-      firstResultResolver?: (value: Message | Task | PromiseLike<Message | Task>) => void;
+      firstResultResolver?: (value: Message | Task) => void;
       firstResultRejector?: (reason?: unknown) => void;
     }
   ): Promise<void> {
@@ -375,6 +375,8 @@ export class DefaultRequestHandler implements A2ARequestHandler {
       eventBus.finished();
     });
 
+    const historyLengthConfig = params.configuration;
+
     if (isBlocking) {
       // In blocking mode, wait for the full processing to complete.
       await this._processEvents(taskId, resultManager, eventQueue, context);
@@ -385,12 +387,20 @@ export class DefaultRequestHandler implements A2ARequestHandler {
         );
       }
 
+      if (isTask(finalResult)) {
+        this._applyHistoryLengthSemantics(finalResult, historyLengthConfig ?? {});
+      }
       return finalResult;
     } else {
       // In non-blocking mode, return a promise that will be settled by fullProcessing.
       return new Promise<Message | Task>((resolve, reject) => {
         this._processEvents(taskId, resultManager, eventQueue, context, {
-          firstResultResolver: resolve,
+          firstResultResolver: (result) => {
+            if (isTask(result)) {
+              this._applyHistoryLengthSemantics(result, historyLengthConfig ?? {});
+            }
+            resolve(result);
+          },
           firstResultRejector: reject,
         });
       });
@@ -471,6 +481,12 @@ export class DefaultRequestHandler implements A2ARequestHandler {
       for await (const event of eventQueue.events()) {
         await resultManager.processEvent(event); // Update store in background
         const streamResponse = await this._mapEventToStreamResponse(event, context);
+        if (streamResponse.payload?.$case === 'task') {
+          this._applyHistoryLengthSemantics(
+            streamResponse.payload.value,
+            params.configuration ?? {}
+          );
+        }
         await this._sendPushNotificationIfNeeded(context, streamResponse);
         yield streamResponse;
       }
@@ -486,14 +502,7 @@ export class DefaultRequestHandler implements A2ARequestHandler {
     if (!task) {
       throw new TaskNotFoundError(`Task not found: ${params.id}`);
     }
-    if (params.historyLength !== undefined && params.historyLength >= 0) {
-      if (task.history) {
-        task.history = task.history.slice(-params.historyLength);
-      }
-    } else {
-      // Negative or invalid historyLength means no history
-      task.history = [];
-    }
+    this._applyHistoryLengthSemantics(task, params);
     return task;
   }
 
@@ -511,7 +520,11 @@ export class DefaultRequestHandler implements A2ARequestHandler {
       throw new RequestMalformedError('statusTimestampAfter must be a valid ISO 8601 date string');
     }
 
-    return this.taskStore.list({ ...params, pageSize }, context);
+    const response = await this.taskStore.list({ ...params, pageSize }, context);
+    for (const task of response.tasks) {
+      this._applyHistoryLengthSemantics(task, params);
+    }
+    return response;
   }
 
   async cancelTask(params: CancelTaskRequest, context: ServerCallContext): Promise<Task> {
@@ -834,6 +847,22 @@ export class DefaultRequestHandler implements A2ARequestHandler {
       }
     } else {
       console.error(`Event processing loop failed for task ${taskId}: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Apply historyLength semantics per §3.2.4:
+   * - undefined: no client limit, return all history
+   * - 0: omit history
+   * - N > 0: return at most N most recent messages
+   */
+  private _applyHistoryLengthSemantics(task: Task, params: { historyLength?: number }): void {
+    if (params.historyLength !== undefined) {
+      if (params.historyLength <= 0) {
+        task.history = [];
+      } else {
+        task.history = (task.history ?? []).slice(-params.historyLength);
+      }
     }
   }
 }
