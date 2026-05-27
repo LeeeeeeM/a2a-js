@@ -5,6 +5,11 @@ import { TenantTransportDecorator } from '../../src/client/transports/tenant_tra
 import { AgentCard } from '../../src/index.js';
 import { Client } from '../../src/client/multitransport-client.js';
 import { CallInterceptor } from '../../src/client/interceptors.js';
+import {
+  JsonRpcTransport,
+  JsonRpcTransportFactory,
+} from '../../src/client/transports/json_rpc_transport.js';
+import { LegacyJsonRpcTransport } from '../../src/compat/v0_3/client/transports/json_rpc_transport.js';
 
 describe('ClientFactory', () => {
   let mockTransportFactory1: { protocolName: string; create: Mock };
@@ -335,6 +340,68 @@ describe('ClientFactory', () => {
 
       expect(client).to.be.instanceOf(Client);
       expect(client.transport).not.to.be.instanceOf(TenantTransportDecorator);
+    });
+
+    it('default ClientFactory does NOT route v0.3 JSON-RPC agents through the compat transport', async () => {
+      // No explicit `transports:` config — exercises ClientFactoryOptions.default.
+      // The default `JsonRpcTransportFactory` is constructed without
+      // `legacyCompat`, so v0.3 agents fall through to the v1.0 transport
+      // (mirrors the server-side opt-in convention).
+      const factory = new ClientFactory();
+      agentCard.supportedInterfaces = [
+        {
+          url: 'https://v03.example/rpc',
+          protocolBinding: 'JSONRPC',
+          tenant: '',
+          protocolVersion: '0.3',
+        },
+      ];
+
+      const client = await factory.createFromAgentCard(agentCard);
+
+      expect(client).to.be.instanceOf(Client);
+      expect(client.transport).to.be.instanceOf(JsonRpcTransport);
+      expect(client.transport).not.to.be.instanceOf(LegacyJsonRpcTransport);
+    });
+
+    it('default ClientFactory uses v1.0 JSON-RPC transport for v1.0 agents', async () => {
+      const factory = new ClientFactory();
+      agentCard.supportedInterfaces = [
+        {
+          url: 'https://v1.example/rpc',
+          protocolBinding: 'JSONRPC',
+          tenant: '',
+          protocolVersion: '1.0',
+        },
+      ];
+
+      const client = await factory.createFromAgentCard(agentCard);
+
+      expect(client).to.be.instanceOf(Client);
+      expect(client.transport).to.be.instanceOf(JsonRpcTransport);
+      expect(client.transport).not.to.be.instanceOf(LegacyJsonRpcTransport);
+    });
+
+    it('ClientFactory with legacyCompat-enabled JSON-RPC factory routes v0.3 agents through LegacyJsonRpcTransport', async () => {
+      const factory = new ClientFactory(
+        ClientFactoryOptions.createFrom(ClientFactoryOptions.default, {
+          transports: [new JsonRpcTransportFactory({ legacyCompat: { enabled: true } })],
+        })
+      );
+      agentCard.supportedInterfaces = [
+        {
+          url: 'https://v03.example/rpc',
+          protocolBinding: 'JSONRPC',
+          tenant: '',
+          protocolVersion: '0.3',
+        },
+      ];
+
+      const client = await factory.createFromAgentCard(agentCard);
+
+      expect(client).to.be.instanceOf(Client);
+      expect(client.transport).to.be.instanceOf(LegacyJsonRpcTransport);
+      expect(client.protocolVersion).to.equal('0.3');
     });
   });
 

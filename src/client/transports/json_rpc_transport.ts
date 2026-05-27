@@ -1,17 +1,5 @@
 import { JSONRPCErrorResponse, TransportProtocolName } from '../../core.js';
-import {
-  A2A_ERROR_CODE,
-  ContentTypeNotSupportedError,
-  InvalidAgentResponseError,
-  PushNotificationNotSupportedError,
-  TaskNotCancelableError,
-  TaskNotFoundError,
-  UnsupportedOperationError,
-  RequestMalformedError,
-  ExtendedAgentCardNotConfiguredError,
-  VersionNotSupportedError,
-  ExtensionSupportRequiredError,
-} from '../../errors.js';
+import { mapJsonRpcErrorToSdkError } from '../../errors.js';
 import {
   Task,
   AgentCard,
@@ -21,8 +9,10 @@ import {
 } from '../../index.js';
 import { RequestOptions } from '../multitransport-client.js';
 import { parseSseStream } from '../../sse_utils.js';
+import { isLegacyVersion } from '../../version_utils.js';
 import { Transport, TransportFactory } from './transport.js';
 import {
+  AgentInterface,
   CancelTaskRequest,
   DeleteTaskPushNotificationConfigRequest,
   GetExtendedAgentCardRequest,
@@ -39,6 +29,7 @@ import {
   ListTasksResponse,
 } from '../../types/pb/a2a.js';
 import { JSON_CONTENT_TYPE } from '../../constants.js';
+import { LegacyJsonRpcTransport } from '../../compat/v0_3/client/index.js';
 
 const PROTOCOL_NAME: TransportProtocolName = 'JSONRPC';
 
@@ -250,7 +241,7 @@ export class JsonRpcTransport implements Transport {
         );
       }
       if (errorJson.jsonrpc && errorJson.error) {
-        throw JsonRpcTransport.mapToError(errorJson);
+        throw mapJsonRpcErrorToSdkError(errorJson);
       } else {
         throw new Error(
           `HTTP error for ${method}! Status: ${httpResponse.status} ${httpResponse.statusText}. Response: ${errorBodyText}`
@@ -260,7 +251,7 @@ export class JsonRpcTransport implements Transport {
 
     const json = await httpResponse.json();
     if ('error' in json) {
-      throw JsonRpcTransport.mapToError(json as JSONRPCErrorResponse);
+      throw mapJsonRpcErrorToSdkError(json as JSONRPCErrorResponse);
     }
 
     const rpcResponse = json as JSONRPCSuccessResponse<TResponsePayload>;
@@ -313,7 +304,7 @@ export class JsonRpcTransport implements Transport {
         errorBody = await response.text();
         const errorJson: JSONRPCErrorResponse = JSON.parse(errorBody);
         if (errorJson.error) {
-          throw JsonRpcTransport.mapToError(errorJson);
+          throw mapJsonRpcErrorToSdkError(errorJson);
         }
       } catch (e) {
         if (e instanceof Error && e.name !== 'SyntaxError') {
@@ -329,7 +320,7 @@ export class JsonRpcTransport implements Transport {
         const body = await response.text();
         const errorJson: JSONRPCErrorResponse = JSON.parse(body);
         if (errorJson.error) {
-          throw JsonRpcTransport.mapToError(errorJson);
+          throw mapJsonRpcErrorToSdkError(errorJson);
         }
       } catch (e) {
         if (e instanceof Error && e.name !== 'SyntaxError') {
@@ -374,7 +365,7 @@ export class JsonRpcTransport implements Transport {
       const err = a2aStreamResponse.error;
       throw new Error(
         `SSE event contained an error: ${err.message} (Code: ${err.code}) Data: ${JSON.stringify(err.data || {})}`,
-        { cause: JsonRpcTransport.mapToError(a2aStreamResponse) }
+        { cause: mapJsonRpcErrorToSdkError(a2aStreamResponse) }
       );
     }
 
@@ -384,44 +375,76 @@ export class JsonRpcTransport implements Transport {
 
     return StreamResponse.fromJSON(a2aStreamResponse.result);
   }
-
-  private static mapToError(response: JSONRPCErrorResponse): Error {
-    const errorMessage = response.error.message;
-    switch (response.error.code) {
-      case A2A_ERROR_CODE.PARSE_ERROR:
-      case A2A_ERROR_CODE.INVALID_REQUEST:
-      case A2A_ERROR_CODE.METHOD_NOT_FOUND:
-      case A2A_ERROR_CODE.INVALID_PARAMS:
-      case A2A_ERROR_CODE.INTERNAL_ERROR:
-        return new RequestMalformedError(errorMessage);
-      case A2A_ERROR_CODE.TASK_NOT_FOUND:
-        return new TaskNotFoundError(errorMessage);
-      case A2A_ERROR_CODE.TASK_NOT_CANCELABLE:
-        return new TaskNotCancelableError(errorMessage);
-      case A2A_ERROR_CODE.PUSH_NOTIFICATION_NOT_SUPPORTED:
-        return new PushNotificationNotSupportedError(errorMessage);
-      case A2A_ERROR_CODE.UNSUPPORTED_OPERATION:
-        return new UnsupportedOperationError(errorMessage);
-      case A2A_ERROR_CODE.CONTENT_TYPE_NOT_SUPPORTED:
-        return new ContentTypeNotSupportedError(errorMessage);
-      case A2A_ERROR_CODE.INVALID_AGENT_RESPONSE:
-        return new InvalidAgentResponseError(errorMessage);
-      case A2A_ERROR_CODE.EXTENDED_CARD_NOT_CONFIGURED:
-        return new ExtendedAgentCardNotConfiguredError(errorMessage);
-      case A2A_ERROR_CODE.EXTENSION_SUPPORT_REQUIRED:
-        return new ExtensionSupportRequiredError(errorMessage);
-      case A2A_ERROR_CODE.VERSION_NOT_SUPPORTED:
-        return new VersionNotSupportedError(errorMessage);
-      default:
-        return new JSONRPCTransportError(response);
-    }
-  }
 }
 
 export class JsonRpcTransportFactoryOptions {
   fetchImpl?: typeof fetch;
+  /**
+   * Enables the v0.3 protocol compatibility layer.
+   *
+   * When enabled, the factory inspects the matched
+   * `AgentInterface.protocolVersion` on every `create()` call; if it
+   * falls in `[0.3, 1.0)`, the v0.3 `LegacyJsonRpcTransport` is
+   * instantiated instead of the v1.0 `JsonRpcTransport`.
+   *
+   * Default: omitted (treated as disabled). To talk to v0.3 JSON-RPC
+   * agents, the agent card MUST declare a v0.3 `JSONRPC` interface in
+   * `supportedInterfaces`; see §3.6.2.
+   *
+   * When disabled, the v0.3 compat module is never loaded and v0.3
+   * agents are not contacted via the compat transport.
+   */
+  legacyCompat?: { enabled: boolean };
 }
 
+/**
+ * Picks the `AgentInterface` for the given protocol binding that best
+ * matches the endpoint URL.
+ *
+ * Mirrors Python's `_find_best_interface(..., url=...)`: filters by
+ * `protocolBinding` (case-insensitive), narrows to entries whose `url`
+ * matches if any such entry exists, then prefers `protocolVersion === '1.0'`
+ * among the survivors. Returns `undefined` when nothing matches so the
+ * caller can fall back to a default policy (today: assume v1.0).
+ */
+function pickMatchingInterface(
+  agentCard: AgentCard,
+  protocolBinding: string,
+  url: string
+): AgentInterface | undefined {
+  const target = protocolBinding.toUpperCase();
+  const candidates = (agentCard.supportedInterfaces ?? []).filter(
+    (i) => i.protocolBinding?.toUpperCase() === target
+  );
+  if (candidates.length === 0) return undefined;
+
+  const byUrl = candidates.filter((i) => i.url === url);
+  const pool = byUrl.length > 0 ? byUrl : candidates;
+
+  return pool.find((i) => i.protocolVersion === '1.0') ?? pool[0];
+}
+
+/**
+ * Factory that produces a JSON-RPC `Transport` for the matched agent
+ * interface.
+ *
+ * When the factory is constructed with `legacyCompat: { enabled: true }`,
+ * it transparently dispatches between the v1.0 transport
+ * (`JsonRpcTransport`) and the v0.3 compat transport
+ * (`LegacyJsonRpcTransport`) based on the matched
+ * `AgentInterface.protocolVersion`: when the matched interface declares
+ * `protocolVersion` in `[0.3, 1.0)`, the v0.3 transport is used;
+ * otherwise (1.0 / empty / missing), the v1.0 transport is used.
+ *
+ * When `legacyCompat` is omitted or `{ enabled: false }`, the factory
+ * always produces the v1.0 `JsonRpcTransport` and never loads the compat
+ * module. This mirrors the server-side opt-in convention shared with the
+ * Express JSON-RPC and REST handlers.
+ *
+ * The v0.3 transport module is loaded lazily on demand, so callers that
+ * only ever talk to v1.0 agents never pull compat code into their runtime
+ * graph.
+ */
 export class JsonRpcTransportFactory implements TransportFactory {
   constructor(private readonly options?: JsonRpcTransportFactoryOptions) {}
 
@@ -429,7 +452,16 @@ export class JsonRpcTransportFactory implements TransportFactory {
     return PROTOCOL_NAME;
   }
 
-  async create(url: string, _agentCard: AgentCard): Promise<Transport> {
+  async create(url: string, agentCard: AgentCard): Promise<Transport> {
+    if (this.options?.legacyCompat?.enabled) {
+      const iface = pickMatchingInterface(agentCard, PROTOCOL_NAME, url);
+      if (iface && isLegacyVersion(iface.protocolVersion)) {
+        return new LegacyJsonRpcTransport({
+          endpoint: url,
+          fetchImpl: this.options?.fetchImpl,
+        });
+      }
+    }
     return new JsonRpcTransport({
       endpoint: url,
       fetchImpl: this.options?.fetchImpl,
@@ -451,11 +483,3 @@ interface JSONRPCSuccessResponse<T> {
 }
 
 type JSONRPCResponse<T> = JSONRPCSuccessResponse<T> | JSONRPCErrorResponse;
-
-export class JSONRPCTransportError extends Error {
-  constructor(public errorResponse: JSONRPCErrorResponse) {
-    super(
-      `JSON-RPC error: ${errorResponse.error.message} (Code: ${errorResponse.error.code}) Data: ${JSON.stringify(errorResponse.error.data || {})}`
-    );
-  }
-}
