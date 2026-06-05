@@ -26,6 +26,9 @@ import { FromProto } from '../../../types/converters/from_proto.js';
 
 import { A2A_REASON_TO_ERROR_CLASS, ERROR_INFO_TYPE } from '../../../errors.js';
 import { decodeStatus, decodeErrorInfo } from '../../../server/grpc/error_details.js';
+import { LegacyGrpcTransport } from '../../../compat/v0_3/client/transports/grpc/index.js';
+import { isLegacyVersion } from '../../../version_utils.js';
+import { pickMatchingInterface } from '../pick_interface.js';
 
 const PROTOCOL_NAME: TransportProtocolName = 'GRPC';
 
@@ -353,8 +356,43 @@ export class GrpcTransport implements Transport {
 export class GrpcTransportFactoryOptions {
   grpcChannelCredentials?: grpc.ChannelCredentials;
   grpcCallOptions?: Partial<grpc.CallOptions>;
+  /**
+   * Enables the v0.3 protocol compatibility layer.
+   *
+   * When enabled, the factory inspects the matched
+   * `AgentInterface.protocolVersion` on every `create()` call; if it
+   * falls in `[0.3, 1.0)`, the v0.3 `LegacyGrpcTransport` is
+   * instantiated instead of the v1.0 `GrpcTransport`.
+   *
+   * Default: omitted (treated as disabled). To talk to v0.3 gRPC
+   * agents, the agent card MUST declare a v0.3 `GRPC` interface in
+   * `supportedInterfaces`; see §3.6.2.
+   *
+   * When disabled, the v0.3 compat module is never reached on the
+   * dispatch path and v0.3 agents are not contacted via the compat
+   * transport.
+   */
+  legacyCompat?: { enabled: boolean };
 }
 
+/**
+ * Factory that produces a gRPC `Transport` for the matched agent
+ * interface.
+ *
+ * When the factory is constructed with `legacyCompat: { enabled: true }`,
+ * it transparently dispatches between the v1.0 transport
+ * (`GrpcTransport`) and the v0.3 compat transport
+ * (`LegacyGrpcTransport`) based on the matched
+ * `AgentInterface.protocolVersion`: when the matched interface declares
+ * `protocolVersion` in `[0.3, 1.0)`, the v0.3 transport is used;
+ * otherwise (1.0 / empty / missing), the v1.0 transport is used.
+ *
+ * When `legacyCompat` is omitted or `{ enabled: false }`, the factory
+ * always produces the v1.0 `GrpcTransport` and never consults the
+ * matched interface's version. This mirrors the opt-in convention
+ * shared with `JsonRpcTransportFactory.legacyCompat` and
+ * `RestTransportFactory.legacyCompat`.
+ */
 export class GrpcTransportFactory implements TransportFactory {
   constructor(private readonly options?: GrpcTransportFactoryOptions) {}
 
@@ -362,7 +400,17 @@ export class GrpcTransportFactory implements TransportFactory {
     return PROTOCOL_NAME;
   }
 
-  async create(url: string, _agentCard: AgentCard): Promise<Transport> {
+  async create(url: string, agentCard: AgentCard): Promise<Transport> {
+    if (this.options?.legacyCompat?.enabled) {
+      const iface = pickMatchingInterface(agentCard, PROTOCOL_NAME, url);
+      if (iface && isLegacyVersion(iface.protocolVersion)) {
+        return new LegacyGrpcTransport({
+          endpoint: url,
+          grpcChannelCredentials: this.options?.grpcChannelCredentials,
+          grpcCallOptions: this.options?.grpcCallOptions,
+        });
+      }
+    }
     return new GrpcTransport({
       endpoint: url,
       grpcChannelCredentials: this.options?.grpcChannelCredentials,

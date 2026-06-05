@@ -27,13 +27,13 @@ import { buildGrpcErrorMetadata } from './error_details.js';
 import { UserBuilder } from './common.js';
 import { A2A_VERSION_HEADER, HTTP_EXTENSION_HEADER } from '../../constants.js';
 import {
+  ContentTypeNotSupportedError,
   ExtendedAgentCardNotConfiguredError,
   ExtensionSupportRequiredError,
-  ContentTypeNotSupportedError,
-  InvalidAgentResponseError,
-  RequestMalformedError,
   GenericError,
+  InvalidAgentResponseError,
   PushNotificationNotSupportedError,
+  RequestMalformedError,
   TaskNotCancelableError,
   TaskNotFoundError,
   UnsupportedOperationError,
@@ -228,6 +228,10 @@ export function grpcService(options: GrpcServiceOptions): A2AServiceServer {
  *
  * For A2A-specific errors, includes a `google.rpc.ErrorInfo` in the
  * `grpc-status-details-bin` trailing metadata with `reason` and `domain`.
+ *
+ * Uses an `instanceof` chain so user-defined subclasses of A2A error
+ * types (e.g. `class MyTaskNotFound extends TaskNotFoundError {}`)
+ * resolve to the correct gRPC status of the nearest base.
  */
 const mapToError = (error: unknown): Partial<grpc.ServiceError> => {
   let code = grpc.status.UNKNOWN;
