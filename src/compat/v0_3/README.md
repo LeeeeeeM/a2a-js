@@ -45,3 +45,41 @@ Notable policy decisions:
 - `TaskStatusUpdateEvent.final` is computed from the status state going v1.0 → v0.3 (`true` for `completed`, `canceled`, `failed`, `rejected`).
 - `SendMessageConfiguration.returnImmediately` ↔ `MessageSendConfiguration.blocking` with inverted polarity.
 - `toCompatAgentCard` filters `supportedInterfaces` to those whose `protocolVersion` is empty or in `[0.3, 1.0)` and throws `VersionNotSupportedError` if none qualify.
+
+## Push Notifications
+
+Webhooks registered over v0.3 transports must receive the v0.3-shaped HTTP body, not the v1.0 `StreamResponse` wrapper. Per the v0.3 spec example (§9.5), the body is the **bare event object** (a v0.3 JSON `Task`, `TaskStatusUpdateEvent`, or `TaskArtifactUpdateEvent` discriminated by its `kind` field) with `Content-Type: application/json` — no `StreamResponse` discriminator and no JSON-RPC envelope.
+
+This is implemented by two pieces working together:
+
+1. **`PushNotificationStore` captures the wire version.** The `InMemoryPushNotificationStore` (and any conforming implementation) reads `context.requestedVersion` on `save()` and persists it alongside the config as a `StoredPushNotificationConfig { config, wireVersion }`. The wire version is surfaced via the optional `loadWithMetadata` read method.
+
+2. **`DefaultPushNotificationSender` routes per wire version.** The sender prefers `loadWithMetadata` when the store implements it, otherwise falls back to `load` and defaults every entry to wire version `'0.3'` per spec §3.6.2's absent-header rule. It always registers `V1PushNotificationSerializer` under `'1.0'` and falls back to it (with a one-time warning per unknown version) when no serializer is registered for the entry's version.
+
+### Enabling v0.3 push delivery
+
+Use `createLegacyAwarePushNotificationSender` from `src/compat/v0_3/server/index.ts` (re-exported as `createLegacyAwarePushNotificationSender` from `@a2a-js/sdk/server`'s compat barrel) instead of constructing the sender directly. It pre-registers `V03PushNotificationSerializer` under the `'0.3'` key:
+
+```ts
+import { InMemoryPushNotificationStore } from '@a2a-js/sdk/server';
+import { createLegacyAwarePushNotificationSender } from '@a2a-js/sdk/compat/v0_3/server';
+
+const store = new InMemoryPushNotificationStore();
+const sender = createLegacyAwarePushNotificationSender(store);
+
+// Hand both to your DefaultRequestHandler as usual.
+```
+
+v1.0-registered webhooks continue to receive the canonical `StreamResponse` body with `application/a2a+json`; v0.3-registered webhooks receive the bare-event JSON with `application/json`. Custom serializers (or overrides for the built-in `'0.3'` / `'1.0'` entries) can be supplied via the `serializers` option; user-supplied entries take precedence.
+
+### Caveat for custom `PushNotificationStore` implementations
+
+The `PushNotificationStore.loadWithMetadata` method is optional. The SDK's `InMemoryPushNotificationStore` implements it. **Custom store implementations that omit it cause the sender to default each dispatch to the wire version of the request that _triggered_ the dispatch (`context.requestedVersion`),** falling back to `'0.3'` per spec §3.6.2 only when the triggering context carries no version.
+
+What this means for the two deployment shapes a v1.0 server can take:
+
+- **Pure v1.0 deployment** (no compat layer opted in): no concern. Every triggering context carries `'1.0'`, the built-in V1 serializer handles every dispatch, and no warnings are emitted — even with a custom store implementation.
+
+- **v1.0 deployment with v0.3 compat opted in** (`createLegacyAwarePushNotificationSender`): each webhook receives the body shape of whichever client _triggered_ the dispatch, not necessarily of the client that originally registered the webhook. If a v1.0 client triggers an event for a task with a webhook registered by a legacy v0.3 client, that v0.3 webhook will receive a v1.0 body (and vice versa). Implement `loadWithMetadata` on your custom store (mirror `InMemoryPushNotificationStore`'s 3-line implementation) to preserve the originating wire version per config.
+
+The compat layer (and therefore the caveat above) is opt-in and will be retired once the legacy v0.3 client base has migrated to v1.0.

@@ -1542,6 +1542,71 @@ describe('DefaultRequestHandler as A2ARequestHandler', () => {
     assert.isTrue(afterClose.done, 'Stream should be closed after message-only response');
   });
 
+  it('sendMessageStream: handler invokes sender for stand-alone messages without error', async () => {
+    // The handler ALWAYS invokes the sender per §4.3.3 (which lists all
+    // four payload variants as valid). For stand-alone messages (no
+    // taskId), the sender's own _getTaskId-empty guard short-circuits
+    // dispatch silently — no webhook call, no error log.
+    const pushNotificationStore = new InMemoryPushNotificationStore();
+    const mockPushNotificationSender = new MockPushNotificationSender();
+    const handlerWithPush = new DefaultRequestHandler(
+      testAgentCard,
+      mockTaskStore,
+      mockAgentExecutor,
+      executionEventBusManager,
+      pushNotificationStore,
+      mockPushNotificationSender
+    );
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const params: SendMessageRequest = {
+      message: createTestMessage('msg-no-push', 'message-only push-skip test'),
+    } as SendMessageRequest;
+
+    (mockAgentExecutor as MockAgentExecutor).execute.mockImplementation(async (_ctx, bus) => {
+      bus.publish(
+        AgentEvent.message({
+          messageId: 'msg-response-no-push',
+          role: Role.ROLE_AGENT,
+          contextId: '',
+          taskId: '',
+          parts: [
+            {
+              content: { $case: 'text', value: 'response' },
+              mediaType: 'text/plain',
+              filename: '',
+              metadata: {},
+            },
+          ],
+          metadata: {},
+          extensions: [],
+          referenceTaskIds: [],
+        })
+      );
+      bus.finished();
+    });
+
+    const events: StreamResponse[] = [];
+    const generator = handlerWithPush.sendMessageStream(params, serverCallContext);
+    for await (const event of generator) {
+      events.push(event);
+    }
+
+    // Stream produced the message as expected.
+    assert.lengthOf(events, 1);
+    assert.equal(events[0].payload?.$case, 'message');
+
+    // The handler hands the event to the sender (mock resolves to undefined
+    // without hitting the real send path).
+    expect(mockPushNotificationSender.send).toHaveBeenCalled();
+
+    // No `Failed to send push notification` error should have been logged.
+    const offendingCalls = errorSpy.mock.calls.filter((args) =>
+      String(args[0]).includes('Failed to send push notification')
+    );
+    expect(offendingCalls).toHaveLength(0);
+  });
+
   it('sendMessageStream: should throw when statusUpdate arrives before task', async () => {
     const taskId = 'task-order-1';
     const contextId = 'ctx-order-1';
@@ -2742,7 +2807,12 @@ describe('DefaultRequestHandler as A2ARequestHandler', () => {
     assert.deepEqual(thirdCallResponse, expectedThirdResponse);
   });
 
-  it('should send push notification when message event is received', async () => {
+  it('should send push notification when message event is received (§4.3.3)', async () => {
+    // Per §4.3.3 all four StreamResponse payload variants (`task`,
+    // `message`, `statusUpdate`, `artifactUpdate`) are valid
+    // push-notification payloads. A message event bound to a task MUST
+    // reach the sender; the sender then routes to the right serializer.
+    // No `Failed to send push notification` error should be logged.
     const mockPushNotificationStore = new InMemoryPushNotificationStore();
     const mockPushNotificationSender = new MockPushNotificationSender();
 
@@ -2794,13 +2864,19 @@ describe('DefaultRequestHandler as A2ARequestHandler', () => {
       bus.finished();
     });
 
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     await handler.sendMessage(params, serverCallContext);
 
     expect((mockPushNotificationSender as MockPushNotificationSender).send).toHaveBeenCalled();
     const callResponse = (mockPushNotificationSender as MockPushNotificationSender).send.mock
       .calls[0][0] as StreamResponse;
-    expect(callResponse.payload.$case).toBe('message');
+    expect(callResponse.payload?.$case).toBe('message');
     expect((callResponse.payload as { value: Message }).value.messageId).toBe('msg-reply-1');
+    // No misleading error log.
+    const offendingCalls = errorSpy.mock.calls.filter((args) =>
+      String(args[0]).includes('Failed to send push notification')
+    );
+    expect(offendingCalls).toHaveLength(0);
   });
 
   it('should send push notification when statusUpdate event is received', async () => {

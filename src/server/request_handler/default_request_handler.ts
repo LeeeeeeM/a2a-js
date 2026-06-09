@@ -801,6 +801,12 @@ export class DefaultRequestHandler implements A2ARequestHandler {
    * Sends a push notification if configured.
    * Fire-and-forget: push notification delivery should not block the stream or response.
    * Errors are logged but do not propagate to the caller.
+   *
+   * Per §4.3.3 all four `StreamResponse` payload variants (`task`,
+   * `message`, `statusUpdate`, `artifactUpdate`) are valid push-notification
+   * payloads. The sender silently skips stand-alone Messages that carry no
+   * task association (message-only stream pattern in §3.1.2) since no
+   * push config can be registered for them.
    */
   private async _sendPushNotificationIfNeeded(
     context: ServerCallContext,
