@@ -11,7 +11,12 @@ import {
   StreamResponse,
   A2A_VERSION_HEADER,
   A2A_PROTOCOL_VERSION,
+  HTTP_EXTENSION_HEADER,
 } from '../../src/index.js';
+import {
+  A2A_LEGACY_PROTOCOL_VERSION,
+  LEGACY_HTTP_EXTENSION_HEADER,
+} from '../../src/compat/v0_3/constants.js';
 
 /**
  * Helper: the default RequestOptions that the Client injects when the caller
@@ -1449,6 +1454,239 @@ describe('Client', () => {
 
       // The transport's protocolVersion always takes precedence
       expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, defaultVersionOptions);
+    });
+  });
+
+  describe('Extension header normalization', () => {
+    const makeTask = (): Task => ({
+      id: '123',
+      contextId: 'ctx1',
+      status: {
+        state: TaskState.TASK_STATE_COMPLETED,
+        timestamp: undefined,
+        message: undefined,
+      },
+      artifacts: [],
+      history: [],
+      metadata: {},
+    });
+
+    const params = { tenant: '', id: '123', historyLength: 0 };
+
+    describe('on a v1.0 transport', () => {
+      beforeEach(() => {
+        transport.protocolVersion = A2A_PROTOCOL_VERSION;
+        client = new Client(transport, agentCard);
+        transport.getTask.mockResolvedValue(makeTask());
+      });
+
+      it('passes A2A-Extensions through unchanged', async () => {
+        await client.getTask(params, {
+          serviceParameters: { [HTTP_EXTENSION_HEADER]: 'ext1' },
+        });
+
+        expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+          serviceParameters: {
+            [A2A_VERSION_HEADER]: A2A_PROTOCOL_VERSION,
+            [HTTP_EXTENSION_HEADER]: 'ext1',
+          },
+        });
+      });
+
+      it('rewrites X-A2A-Extensions to the v1.0 spelling', async () => {
+        await client.getTask(params, {
+          serviceParameters: { [LEGACY_HTTP_EXTENSION_HEADER]: 'ext1' },
+        });
+
+        expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+          serviceParameters: {
+            [A2A_VERSION_HEADER]: A2A_PROTOCOL_VERSION,
+            [HTTP_EXTENSION_HEADER]: 'ext1',
+          },
+        });
+      });
+
+      it('prefers the v1.0 spelling when both are present', async () => {
+        await client.getTask(params, {
+          serviceParameters: {
+            [HTTP_EXTENSION_HEADER]: 'canonical',
+            [LEGACY_HTTP_EXTENSION_HEADER]: 'legacy',
+          },
+        });
+
+        expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+          serviceParameters: {
+            [A2A_VERSION_HEADER]: A2A_PROTOCOL_VERSION,
+            [HTTP_EXTENSION_HEADER]: 'canonical',
+          },
+        });
+      });
+
+      it('does not synthesize an extension header when none was provided', async () => {
+        await client.getTask(params);
+
+        expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, defaultVersionOptions);
+      });
+    });
+
+    describe('on a legacy v0.3 transport', () => {
+      beforeEach(() => {
+        transport.protocolVersion = A2A_LEGACY_PROTOCOL_VERSION;
+        client = new Client(transport, agentCard);
+        transport.getTask.mockResolvedValue(makeTask());
+      });
+
+      it('rewrites A2A-Extensions to the legacy X-A2A-Extensions spelling', async () => {
+        await client.getTask(params, {
+          serviceParameters: { [HTTP_EXTENSION_HEADER]: 'ext1' },
+        });
+
+        expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+          serviceParameters: {
+            [A2A_VERSION_HEADER]: A2A_LEGACY_PROTOCOL_VERSION,
+            [LEGACY_HTTP_EXTENSION_HEADER]: 'ext1',
+          },
+        });
+      });
+
+      it('passes X-A2A-Extensions through unchanged', async () => {
+        await client.getTask(params, {
+          serviceParameters: { [LEGACY_HTTP_EXTENSION_HEADER]: 'ext1' },
+        });
+
+        expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+          serviceParameters: {
+            [A2A_VERSION_HEADER]: A2A_LEGACY_PROTOCOL_VERSION,
+            [LEGACY_HTTP_EXTENSION_HEADER]: 'ext1',
+          },
+        });
+      });
+
+      it('prefers the legacy spelling when both are present', async () => {
+        await client.getTask(params, {
+          serviceParameters: {
+            [HTTP_EXTENSION_HEADER]: 'canonical',
+            [LEGACY_HTTP_EXTENSION_HEADER]: 'legacy',
+          },
+        });
+
+        expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+          serviceParameters: {
+            [A2A_VERSION_HEADER]: A2A_LEGACY_PROTOCOL_VERSION,
+            [LEGACY_HTTP_EXTENSION_HEADER]: 'legacy',
+          },
+        });
+      });
+
+      it('does not synthesize an extension header when none was provided', async () => {
+        await client.getTask(params);
+
+        expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+          serviceParameters: { [A2A_VERSION_HEADER]: A2A_LEGACY_PROTOCOL_VERSION },
+        });
+      });
+    });
+
+    describe('with case variants', () => {
+      describe('on a v1.0 transport', () => {
+        beforeEach(() => {
+          transport.protocolVersion = A2A_PROTOCOL_VERSION;
+          client = new Client(transport, agentCard);
+          transport.getTask.mockResolvedValue(makeTask());
+        });
+
+        it('matches a lowercase canonical key case-insensitively', async () => {
+          await client.getTask(params, {
+            serviceParameters: { 'a2a-extensions': 'ext1' },
+          });
+
+          expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+            serviceParameters: {
+              [A2A_VERSION_HEADER]: A2A_PROTOCOL_VERSION,
+              [HTTP_EXTENSION_HEADER]: 'ext1',
+            },
+          });
+        });
+
+        it('matches a lowercase legacy alias case-insensitively', async () => {
+          await client.getTask(params, {
+            serviceParameters: { 'x-a2a-extensions': 'ext1' },
+          });
+
+          expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+            serviceParameters: {
+              [A2A_VERSION_HEADER]: A2A_PROTOCOL_VERSION,
+              [HTTP_EXTENSION_HEADER]: 'ext1',
+            },
+          });
+        });
+
+        it('prefers the exact canonical spelling when a lowercase variant is also present', async () => {
+          await client.getTask(params, {
+            serviceParameters: {
+              [HTTP_EXTENSION_HEADER]: 'exact',
+              'a2a-extensions': 'variant',
+            },
+          });
+
+          expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+            serviceParameters: {
+              [A2A_VERSION_HEADER]: A2A_PROTOCOL_VERSION,
+              [HTTP_EXTENSION_HEADER]: 'exact',
+            },
+          });
+        });
+
+        it('prefers the exact alias spelling when only alias variants are present', async () => {
+          await client.getTask(params, {
+            serviceParameters: {
+              [LEGACY_HTTP_EXTENSION_HEADER]: 'exact',
+              'x-a2a-extensions': 'variant',
+            },
+          });
+
+          expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+            serviceParameters: {
+              [A2A_VERSION_HEADER]: A2A_PROTOCOL_VERSION,
+              [HTTP_EXTENSION_HEADER]: 'exact',
+            },
+          });
+        });
+      });
+
+      describe('on a legacy v0.3 transport', () => {
+        beforeEach(() => {
+          transport.protocolVersion = A2A_LEGACY_PROTOCOL_VERSION;
+          client = new Client(transport, agentCard);
+          transport.getTask.mockResolvedValue(makeTask());
+        });
+
+        it('matches a lowercase v1.0 key and rewrites to the legacy spelling', async () => {
+          await client.getTask(params, {
+            serviceParameters: { 'a2a-extensions': 'ext1' },
+          });
+
+          expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+            serviceParameters: {
+              [A2A_VERSION_HEADER]: A2A_LEGACY_PROTOCOL_VERSION,
+              [LEGACY_HTTP_EXTENSION_HEADER]: 'ext1',
+            },
+          });
+        });
+
+        it('matches a lowercase legacy key case-insensitively', async () => {
+          await client.getTask(params, {
+            serviceParameters: { 'x-a2a-extensions': 'ext1' },
+          });
+
+          expect(transport.getTask).toHaveBeenCalledExactlyOnceWith(params, {
+            serviceParameters: {
+              [A2A_VERSION_HEADER]: A2A_LEGACY_PROTOCOL_VERSION,
+              [LEGACY_HTTP_EXTENSION_HEADER]: 'ext1',
+            },
+          });
+        });
+      });
     });
   });
 });
