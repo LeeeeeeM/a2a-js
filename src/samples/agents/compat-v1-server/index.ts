@@ -51,12 +51,8 @@ import {
   restHandler,
   UserBuilder,
 } from '../../../server/express/index.js';
-import {
-  A2AService,
-  LegacyA2AService,
-  grpcService,
-  legacyGrpcService,
-} from '../../../server/grpc/index.js';
+import { A2AService, grpcService } from '../../../server/grpc/index.js';
+import { LegacyA2AService, legacyGrpcService } from '../../../compat/v0_3/server/grpc/index.js';
 import { createLegacyAwarePushNotificationSender } from '../../../compat/v0_3/server/index.js';
 import { SampleAgentExecutor } from '../sample-agent/agent_executor.js';
 
