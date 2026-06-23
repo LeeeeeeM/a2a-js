@@ -20,7 +20,7 @@ import {
   A2A_VERSION_HEADER,
   HTTP_EXTENSION_HEADER,
 } from '../../constants.js';
-import { UserBuilder } from './common.js';
+import { UserBuilder, delegateAsyncIterator } from './common.js';
 import { Extensions } from '../../extensions.js';
 import { validateVersion } from '../version.js';
 import { legacyRestRouter } from '../../compat/v0_3/server/express/index.js';
@@ -301,7 +301,7 @@ export function restHandler(options: RestHandlerOptions): RequestHandler {
         const result = StreamResponse.toJSON(firstResult.value);
         res.write(formatSSEEvent(result));
       }
-      for await (const event of { [Symbol.asyncIterator]: () => iterator }) {
+      for await (const event of delegateAsyncIterator(iterator)) {
         const result = StreamResponse.toJSON(event);
         res.write(formatSSEEvent(result));
       }
