@@ -986,8 +986,7 @@ export class DefaultRequestHandler implements A2ARequestHandler {
     }
 
     await this.pushNotificationStore?.save(taskId, context, params);
-
-    return params;
+    return structuredClone(params);
   }
 
   async getTaskPushNotificationConfig(

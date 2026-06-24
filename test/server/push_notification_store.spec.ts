@@ -42,15 +42,24 @@ describe('InMemoryPushNotificationStore.load() (canonical, version-agnostic read
     expect(loaded).toEqual([]);
   });
 
-  it('defaults a missing config id to the taskId on save', async () => {
+  it('assigns a server-side UUID when saved with an empty config id', async () => {
+    // Spec §3.1.7 / §5.1: id is the *result* of Create, not an input
+    // requirement. The store assigns a UUID at the save boundary so
+    // every entry point — `createTaskPushNotificationConfig`,
+    // `sendMessage`'s and `sendMessageStream`'s
+    // `params.configuration.taskPushNotificationConfig` paths — gets
+    // the same auto-assignment.
     const context = new ServerCallContext({ requestedVersion: A2A_PROTOCOL_VERSION });
-    const config = makeConfig({ id: '' });
 
-    await store.save('task-id-default', context, config);
-    const loaded = await store.load('task-id-default', context);
+    await store.save('task-id-empty', context, makeConfig({ id: '' }));
+    await store.save('task-id-empty', context, makeConfig({ id: '' }));
+    const loaded = await store.load('task-id-empty', context);
 
-    expect(loaded).toHaveLength(1);
-    expect(loaded[0].id).toBe('task-id-default');
+    expect(loaded).toHaveLength(2);
+    const UUIDV4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    expect(loaded[0].id).toMatch(UUIDV4_RE);
+    expect(loaded[1].id).toMatch(UUIDV4_RE);
+    expect(loaded[0].id).not.toBe(loaded[1].id);
   });
 
   it('delete() matches against the config id', async () => {
