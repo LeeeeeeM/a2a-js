@@ -226,18 +226,19 @@ export class DefaultRequestHandler implements A2ARequestHandler {
       );
     }
 
-    // Filter client-requested extensions to only those the agent exposes.
+    // Narrow the client-requested set to extensions the agent actually
+    // exposes (§4.6.3: "SHOULD ignore the extension … and proceed
+    // without it"). Mutate in place — the Express / gRPC transport
+    // layer holds a reference to this context and, after dispatch,
+    // reads `activatedExtensions` off it to populate the response
+    // `A2A-Extensions` header. Replacing the reference would strand
+    // later `addActivatedExtension(...)` calls from the executor on a
+    // dead object and silently drop the header.
     if (context.requestedExtensions) {
       const exposedExtensions = new Set(agentExtensions.map((ext) => ext.uri));
-      const validExtensions = context.requestedExtensions.filter((extension) =>
-        exposedExtensions.has(extension)
+      context.setRequestedExtensions(
+        context.requestedExtensions.filter((extension) => exposedExtensions.has(extension))
       );
-      context = new ServerCallContext({
-        requestedExtensions: validExtensions,
-        user: context.user,
-        requestedVersion: context.requestedVersion,
-        tenant: context.tenant,
-      });
     }
 
     const messageForContext = {
