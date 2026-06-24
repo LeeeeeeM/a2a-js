@@ -1,33 +1,33 @@
 /**
  * `Part` translators between v1.0 proto and v0.3 JSON.
  *
- * The two formats differ in two structural ways:
+ * Shape differences:
+ *  - v1.0 discriminator: `part.content.$case` ∈ `'text' | 'raw' | 'url' | 'data'`.
+ *    v0.3 discriminator: `part.kind` ∈ `'text' | 'file' | 'data'`, with the
+ *    bytes-vs-uri choice nested under `part.file`.
+ *  - v1.0 carries `filename` / `mediaType` at the top level; v0.3 carries
+ *    `name` / `mimeType` on the inner `file`.
  *
- *  - **Outer discriminator.** v1.0 uses `part.content.$case` with the four
- *    cases `'text' | 'raw' | 'url' | 'data'`; v0.3 JSON uses `part.kind`
- *    with the three cases `'text' | 'file' | 'data'` and nests the
- *    file-bytes-vs-uri choice under `part.file` (`FileWithBytes |
- *    FileWithUri`).
- *  - **File metadata.** v1.0 carries `filename` and `mediaType` as
- *    top-level fields on every Part (only meaningful for file parts);
- *    v0.3 puts the equivalents (`name`, `mimeType`) on the inner `file`
- *    object.
- *
- * **Data parts.** v1.0 `Part.data` is a `google.protobuf.Value`, so it can
- * carry primitives, arrays, and `null` in addition to objects. v0.3
- * `DataPart.data` is typed `{ [k: string]: unknown }` — strictly a JSON
- * object. v1.0 data parts whose `value` is a primitive, array, or `null`
- * therefore cannot be represented in v0.3 and throw `A2AError.invalidParams`
- * during `toCompatPart`. (The Python SDK wraps such values as
- * `{ value: <primitive> }` with a private `data_part_compat = true`
- * metadata flag, but that pollutes the v0.3 wire format with an out-of-spec
- * key; we deliberately diverge from Python here.)
+ * Data parts: v1.0 `Part.data` admits any JSON value (primitives, arrays,
+ * `null`, objects); v0.3 `DataPart.data` admits only objects. Primitive /
+ * array / `null` values are wrapped as `{ value: <original> }` and tagged
+ * with `metadata.data_part_compat = true`; `toCorePart` reverses the
+ * wrap when the flag is present and strips the flag from the result.
+ * Values that cannot be JSON-serialized (`Symbol`, `function`, `bigint`,
+ * `undefined`, `Buffer`) still throw `A2AError.invalidParams`.
  */
 
 import { A2AError } from '../server/error.js';
 import type * as legacy from '../types/types.js';
 import type { Part as V1Part } from '../../../types/pb/a2a.js';
 import { deepCloneMetadata } from './_clone.js';
+
+/**
+ * Metadata key tagging v0.3 `DataPart`s whose `data` field carries the
+ * `{ value: <primitive|array|null> }` wrapper synthesized by
+ * `toCompatPart`. Snake_case is the on-the-wire form.
+ */
+const DATA_PART_COMPAT_FLAG = 'data_part_compat';
 
 function isPlainObject(value: unknown): value is { [k: string]: unknown } {
   return (
@@ -36,16 +36,31 @@ function isPlainObject(value: unknown): value is { [k: string]: unknown } {
 }
 
 /**
+ * True for JSON values valid in v1.0 `Part.data` but unrepresentable in
+ * v0.3 `DataPart.data: { [k]: unknown }` (objects only). These are the
+ * values `toCompatPart` wraps as `{ value: <original> }`.
+ */
+function isCompatWrappableDataValue(
+  value: unknown
+): value is string | number | boolean | null | unknown[] {
+  if (value === null) return true;
+  if (Array.isArray(value)) return true;
+  const t = typeof value;
+  return t === 'string' || t === 'number' || t === 'boolean';
+}
+
+/**
  * Converts a v0.3 JSON `Part` into a v1.0 proto `Part`.
  *
- * - Text parts map directly onto `content.$case: 'text'`.
- * - File parts split: `FileWithBytes` → `content.$case: 'raw'` (decoding
- *   the base64 payload into a `Buffer`); `FileWithUri` → `content.$case:
- *   'url'`. The optional `mimeType` / `name` are lifted to the top-level
- *   `mediaType` / `filename` fields.
- * - Data parts pass `data` through unchanged (v0.3 schema guarantees
- *   `data` is a plain object, which is always valid for the v1.0
- *   `google.protobuf.Value` target).
+ * - Text → `content.$case: 'text'`.
+ * - File: `FileWithBytes` → `'raw'` (base64-decoded into a `Buffer`);
+ *   `FileWithUri` → `'url'`. Inner `mimeType` / `name` lift to top-level
+ *   `mediaType` / `filename`.
+ * - Data: `data` passes through unchanged, except when
+ *   `metadata.data_part_compat === true` and `data` has shape
+ *   `{ value: <primitive|array|null> }` — then the wrapper is stripped,
+ *   `data.value` becomes the v1.0 value, and the flag is removed
+ *   (dropping `metadata` entirely if empty).
  */
 export function toCorePart(compatPart: legacy.Part): V1Part {
   if (compatPart.kind === 'text') {
@@ -83,9 +98,27 @@ export function toCorePart(compatPart: legacy.Part): V1Part {
   }
 
   if (compatPart.kind === 'data') {
+    const metadata = deepCloneMetadata(compatPart.metadata);
+    let value: unknown = compatPart.data;
+    let outMetadata = metadata;
+
+    // Reverse the `{ value: <primitive> }` wrap. The flag is the
+    // load-bearing signal — without it a genuine `{ value: ... }`
+    // payload is indistinguishable from a synthesized wrapper. The
+    // flag is stripped so it does not leak into v1.0 metadata.
+    if (metadata !== undefined && metadata[DATA_PART_COMPAT_FLAG] === true) {
+      if (isPlainObject(compatPart.data) && 'value' in compatPart.data) {
+        value = compatPart.data.value;
+      }
+      delete metadata[DATA_PART_COMPAT_FLAG];
+      // Drop the metadata object entirely if the flag was its only key,
+      // so a round-trip from a primitive v1 value yields no metadata.
+      outMetadata = Object.keys(metadata).length > 0 ? metadata : undefined;
+    }
+
     return {
-      content: { $case: 'data', value: compatPart.data },
-      metadata: deepCloneMetadata(compatPart.metadata),
+      content: { $case: 'data', value },
+      metadata: outMetadata,
       filename: '',
       mediaType: '',
     };
@@ -99,18 +132,18 @@ export function toCorePart(compatPart: legacy.Part): V1Part {
 /**
  * Converts a v1.0 proto `Part` into a v0.3 JSON `Part`.
  *
- * - `content.$case: 'text'` ↔ `kind: 'text'`.
- * - `content.$case: 'raw'` ↔ `kind: 'file'` with `FileWithBytes` (base64
- *   encoding the `Buffer`); `content.$case: 'url'` ↔ `kind: 'file'` with
- *   `FileWithUri`. `filename` / `mediaType` are pushed down into the
- *   inner file's `name` / `mimeType`.
- * - `content.$case: 'data'`: when the v1.0 value is a plain object it is
- *   used directly. Throws `A2AError.invalidParams` when the value is a
- *   primitive, array, or `null` — those are not representable in v0.3's
- *   `DataPart.data: { [k: string]: unknown }` schema.
+ * - `'text'` ↔ `kind: 'text'`.
+ * - `'raw'` ↔ `kind: 'file'` + `FileWithBytes` (base64-encoded `Buffer`).
+ * - `'url'` ↔ `kind: 'file'` + `FileWithUri`. Top-level `filename` /
+ *   `mediaType` push down to inner `name` / `mimeType`.
+ * - `'data'`: plain object → used directly. Primitive / array / `null`
+ *   → wrapped as `{ value: <original> }` with
+ *   `metadata.data_part_compat: true` so `toCorePart` can unwrap.
  *
  * @throws {A2AError} when `content` is missing, has an unknown `$case`,
- * or carries a non-object `data` value.
+ * or carries a `data` value that is neither a plain object nor a
+ * wrap-eligible primitive / array / null (`Symbol`, `function`,
+ * `bigint`, `undefined`, `Buffer`).
  */
 export function toCompatPart(corePart: V1Part): legacy.Part {
   const content = corePart.content;
@@ -153,15 +186,30 @@ export function toCompatPart(corePart: V1Part): legacy.Part {
 
   if (content.$case === 'data') {
     const value: unknown = content.value;
-    if (!isPlainObject(value)) {
-      throw A2AError.invalidParams(
-        'Cannot translate v1 data part to v0.3: value is not a plain object. ' +
-          'v0.3 DataPart.data requires { [k: string]: unknown }; primitives, arrays, and null are not representable.'
-      );
+
+    if (isPlainObject(value)) {
+      const result: legacy.DataPart = { kind: 'data', data: value };
+      if (metadata !== undefined) result.metadata = metadata;
+      return result;
     }
-    const result: legacy.DataPart = { kind: 'data', data: value };
-    if (metadata !== undefined) result.metadata = metadata;
-    return result;
+
+    if (isCompatWrappableDataValue(value)) {
+      // Wrap and tag so `toCorePart` can losslessly unwrap. No
+      // defensive clone — matches the plain-object branch above.
+      const data: { [k: string]: unknown } = { value };
+      const outMetadata: { [k: string]: unknown } = metadata ?? {};
+      outMetadata[DATA_PART_COMPAT_FLAG] = true;
+      const result: legacy.DataPart = { kind: 'data', data, metadata: outMetadata };
+      return result;
+    }
+
+    throw A2AError.invalidParams(
+      'Cannot translate v1 data part to v0.3: value is neither a plain object ' +
+        'nor a wrap-eligible primitive / array / null ' +
+        '(e.g., Symbol, function, bigint, undefined, Buffer). ' +
+        'Primitives, arrays, and null are wrapped as { value: ... } with data_part_compat=true; ' +
+        'all other non-plain-object values are rejected.'
+    );
   }
 
   throw A2AError.invalidParams(

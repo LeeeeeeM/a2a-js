@@ -57,6 +57,69 @@ describe('parts', () => {
       expect(core.content).toEqual({ $case: 'data', value: { x: 1 } });
     });
 
+    it('unwraps a wrapped primitive data part when data_part_compat=true', () => {
+      const compat: legacy.Part = {
+        kind: 'data',
+        data: { value: 42 },
+        metadata: { data_part_compat: true },
+      };
+      const core = toCorePart(compat);
+      expect(core.content).toEqual({ $case: 'data', value: 42 });
+      expect(core.metadata).toBeUndefined();
+    });
+
+    it('unwraps a wrapped null data part when data_part_compat=true', () => {
+      const compat: legacy.Part = {
+        kind: 'data',
+        data: { value: null },
+        metadata: { data_part_compat: true },
+      };
+      const core = toCorePart(compat);
+      expect(core.content).toEqual({ $case: 'data', value: null });
+      expect(core.metadata).toBeUndefined();
+    });
+
+    it('unwraps a wrapped array data part when data_part_compat=true', () => {
+      const compat: legacy.Part = {
+        kind: 'data',
+        data: { value: [1, 2, 3] },
+        metadata: { data_part_compat: true },
+      };
+      const core = toCorePart(compat);
+      expect(core.content).toEqual({ $case: 'data', value: [1, 2, 3] });
+      expect(core.metadata).toBeUndefined();
+    });
+
+    it('preserves non-flag metadata when unwrapping a wrapped data part', () => {
+      const compat: legacy.Part = {
+        kind: 'data',
+        data: { value: 'hello' },
+        metadata: { data_part_compat: true, ext: 'keep-me' },
+      };
+      const core = toCorePart(compat);
+      expect(core.content).toEqual({ $case: 'data', value: 'hello' });
+      expect(core.metadata).toEqual({ ext: 'keep-me' });
+    });
+
+    it('does not unwrap a {value: ...} object when data_part_compat is absent', () => {
+      const compat: legacy.Part = { kind: 'data', data: { value: 42 } };
+      const core = toCorePart(compat);
+      expect(core.content).toEqual({ $case: 'data', value: { value: 42 } });
+    });
+
+    it('does not unwrap when the compat flag is present but not strictly true', () => {
+      // Only the literal boolean `true` triggers unwrap; truthy strings,
+      // 1, etc. are foreign metadata that must round-trip.
+      const compat: legacy.Part = {
+        kind: 'data',
+        data: { value: 42 },
+        metadata: { data_part_compat: 'yes' as unknown as boolean },
+      };
+      const core = toCorePart(compat);
+      expect(core.content).toEqual({ $case: 'data', value: { value: 42 } });
+      expect(core.metadata).toEqual({ data_part_compat: 'yes' });
+    });
+
     it('throws for an unknown kind', () => {
       const compat = { kind: 'unknown' } as unknown as legacy.Part;
       expect(() => toCorePart(compat)).toThrow(A2AError);
@@ -133,9 +196,50 @@ describe('parts', () => {
       expect(toCompatPart(core)).toEqual({ kind: 'data', data: { x: 1 } });
     });
 
-    it('throws when v1 data part value is not a plain object', () => {
-      const nonObjectValues: unknown[] = ['hello', 42, true, null, [1, 2, 3]];
-      for (const value of nonObjectValues) {
+    it.each([
+      ['string', 'hello'],
+      ['number', 42],
+      ['boolean true', true],
+      ['boolean false', false],
+      ['null', null],
+      ['array', [1, 2, 3]],
+    ])('wraps a non-object data value (%s) with data_part_compat=true', (_label, value) => {
+      const core: V1Part = {
+        content: { $case: 'data', value },
+        metadata: undefined,
+        filename: '',
+        mediaType: '',
+      };
+      expect(toCompatPart(core)).toEqual({
+        kind: 'data',
+        data: { value },
+        metadata: { data_part_compat: true },
+      });
+    });
+
+    it('merges the data_part_compat flag with existing metadata when wrapping', () => {
+      const core: V1Part = {
+        content: { $case: 'data', value: 42 },
+        metadata: { ext: 'keep-me' },
+        filename: '',
+        mediaType: '',
+      };
+      expect(toCompatPart(core)).toEqual({
+        kind: 'data',
+        data: { value: 42 },
+        metadata: { ext: 'keep-me', data_part_compat: true },
+      });
+    });
+
+    it.each([
+      ['Symbol', Symbol('s') as unknown],
+      ['function', (() => 0) as unknown],
+      ['bigint', 1n as unknown],
+      ['undefined', undefined as unknown],
+      ['Buffer', Buffer.from('x') as unknown],
+    ])(
+      'throws when v1 data part value is neither a plain object nor a wrap-eligible primitive (%s)',
+      (_label, value: unknown) => {
         const core: V1Part = {
           content: { $case: 'data', value },
           metadata: undefined,
@@ -144,7 +248,7 @@ describe('parts', () => {
         };
         expect(() => toCompatPart(core)).toThrow(A2AError);
       }
-    });
+    );
 
     it('throws when content is missing', () => {
       const core: V1Part = {
@@ -187,6 +291,55 @@ describe('parts', () => {
       const compat: legacy.Part = { kind: 'data', data: { x: 1, y: [2, 3] } };
       expect(toCompatPart(toCorePart(compat))).toEqual(compat);
     });
+
+    it.each([
+      ['string', 'hello'],
+      ['number', 42],
+      ['boolean', true],
+      ['null', null],
+      ['array', [1, 2, 3]],
+    ])(
+      'round-trips a v1 data part with a non-object value (%s) through the v0.3 wrap-and-flag form',
+      (_label, value) => {
+        const core: V1Part = {
+          content: { $case: 'data', value },
+          metadata: undefined,
+          filename: '',
+          mediaType: '',
+        };
+        const compat = toCompatPart(core);
+        expect(compat).toEqual({
+          kind: 'data',
+          data: { value },
+          metadata: { data_part_compat: true },
+        });
+        const roundTripped = toCorePart(compat);
+        expect(roundTripped.content).toEqual({ $case: 'data', value });
+        expect(roundTripped.metadata).toBeUndefined();
+      }
+    );
+
+    it.each([
+      ['string', 'hello'],
+      ['number', 42],
+      ['boolean', true],
+      ['null', null],
+      ['array', [1, 2, 3]],
+    ])(
+      'unwraps an incoming v0.3 payload (%s) tagged with data_part_compat=true',
+      (_label, value) => {
+        // The v1 layer must see the original primitive / array / null,
+        // not a stray `{ value: ... }` object.
+        const compat: legacy.Part = {
+          kind: 'data',
+          data: { value },
+          metadata: { data_part_compat: true },
+        };
+        const core = toCorePart(compat);
+        expect(core.content).toEqual({ $case: 'data', value });
+        expect(core.metadata).toBeUndefined();
+      }
+    );
   });
 
   describe('metadata deep-cloning', () => {
