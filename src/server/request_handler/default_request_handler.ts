@@ -915,8 +915,13 @@ export class DefaultRequestHandler implements A2ARequestHandler {
       throw new TaskNotFoundError(`Task not found: ${params.id}`);
     }
 
-    // Check if task is in a cancelable state
-    if (TERMINAL_STATE_LIST.includes(task.status!.state)) {
+    // §3.3.1: cancel is idempotent — a second cancel on a canceled task
+    // returns the snapshot. Other terminal states are not cancelable.
+    const currentState = task.status?.state;
+    if (currentState === TaskState.TASK_STATE_CANCELED) {
+      return task;
+    }
+    if (currentState !== undefined && TERMINAL_STATE_LIST.includes(currentState)) {
       throw new TaskNotCancelableError(`Task not cancelable: ${params.id}`);
     }
 
