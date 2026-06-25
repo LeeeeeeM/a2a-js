@@ -11,8 +11,17 @@ model changes (renamed fields, restructured types, new operations), see:
 ## Prerequisites
 
 - **Node.js >= 20** is now required (v0.3 supported Node 18).
-- Install the v1.0 SDK: `npm install @a2a-js/sdk@1.0.0-alpha.0`
-  (or `npm install @a2a-js/sdk@next` to always get the latest `@next` release)
+- Install the v1.0 SDK:
+
+  ```bash
+  npm install @a2a-js/sdk
+  ```
+
+> Migrating all v0.3 clients to v1.0 during upgrade is not required: the v1.0 SDK
+> ships an opt-in compatibility layer that lets a v1.0 server accept v0.3
+> clients (and a v1.0 client talk to v0.3 servers). See
+> [compatibility-v0_3.md](compatibility-v0_3.md) for end-user setup and
+> caveats.
 
 ---
 
