@@ -117,32 +117,21 @@ export class JsonRpcTransportHandler {
             : this.requestHandler.resubscribe(SubscribeToTaskRequest.fromJSON(params), context);
 
         // Wrap the agent event stream into a JSON-RPC result stream.
+        // Errors thrown by `agentEventStream` propagate out of the
+        // generator; the Express layer catches them, logs the failure,
+        // and writes a final SSE `event: error` frame carrying the
+        // JSON-RPC error envelope before closing the stream.
         return (async function* jsonRpcEventStream(): AsyncGenerator<
           JSONRPCResponse,
           void,
           undefined
         > {
-          try {
-            for await (const event of agentEventStream) {
-              yield {
-                jsonrpc: '2.0',
-                id: requestId,
-                result: StreamResponse.toJSON(event),
-              };
-            }
-          } catch (streamError) {
-            // If the underlying agent stream throws an error, we need to yield a JSONRPCErrorResponse.
-            // However, an AsyncGenerator is expected to yield JSONRPCResult.
-            // This indicates an issue with how errors from the agent's stream are propagated.
-            // For now, log it. The Express layer will handle the generator ending.
-            console.error(
-              `Error in agent event stream for ${method} (request ${requestId}):`,
-              streamError
-            );
-            // Ideally, the Express layer should catch this and send a final error to the client if the stream breaks.
-            // Or, the agentEventStream itself should yield a final error event that gets wrapped.
-            // For now, we re-throw so it can be caught by the Express layer streaming support.
-            throw streamError;
+          for await (const event of agentEventStream) {
+            yield {
+              jsonrpc: '2.0',
+              id: requestId,
+              result: StreamResponse.toJSON(event),
+            };
           }
         })();
       } else {
