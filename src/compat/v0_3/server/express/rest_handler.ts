@@ -69,6 +69,41 @@ const legacyRestErrorHandler: ErrorRequestHandler = (
 type AsyncRouteHandler = (req: Request, res: Response) => Promise<void>;
 
 /**
+ * Recursively convert object keys from `lowerCamelCase` to `snake_case`.
+ *
+ * `ts-proto`'s `toJSON` emits proto3 canonical lowerCamelCase, but the
+ * v0.3 REST reference stack and the a2a-tck REST client only parse
+ * snake_case (`context_id`, `task_id`, `message_id`). proto3 JSON
+ * accepts both on input — we deviate from the canonical output form to
+ * stay readable for v0.3 clients.
+ *
+ * Keys only; values pass through. `Date` instances are serialized to
+ * ISO-8601 strings (matching `JSON.stringify`'s default for Date). Plain
+ * objects with a `null` prototype are recursed; other non-plain objects
+ * (Buffer, Map, …) are returned as-is.
+ *
+ * Field names listed in `PASSTHROUGH_KEYS` carry arbitrary user-supplied
+ * maps (proto `Struct` / `map<string, Value>` fields like `metadata` and
+ * `DataPart.data`) and MUST NOT be recursed into — snake-casing their
+ * keys would corrupt application data.
+ */
+const PASSTHROUGH_KEYS: ReadonlySet<string> = new Set(['metadata', 'data']);
+
+function toSnakeCaseKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(toSnakeCaseKeys);
+  if (value === null || typeof value !== 'object') return value;
+  if (value instanceof Date) return value.toISOString();
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    const snakeKey = key.replace(/[A-Z]/g, (m) => `_${m.toLowerCase()}`);
+    out[snakeKey] = PASSTHROUGH_KEYS.has(key) ? val : toSnakeCaseKeys(val);
+  }
+  return out;
+}
+
+/**
  * Creates an Express router exposing the v0.3 HTTP+JSON/REST endpoints
  * at the canonical v0.3 reference URLs (`/v1/card`, `/v1/message:send`,
  * etc.). Dispatch is header-based: requests whose `A2A-Version` is not
@@ -170,28 +205,32 @@ export function legacyRestRouter(options: LegacyRestHandlerOptions): RequestHand
     if (!protoResult) {
       throw LegacyA2AError.internalError('sendMessage produced no result.');
     }
-    return LegacyProtoSendMessageResponse.toJSON(protoResult);
+    return toSnakeCaseKeys(LegacyProtoSendMessageResponse.toJSON(protoResult));
   };
 
   const encodeTask = (task: legacy.Task): unknown => {
-    return LegacyProtoTask.toJSON(ToProto.task(task));
+    return toSnakeCaseKeys(LegacyProtoTask.toJSON(ToProto.task(task)));
   };
 
   const encodeTaskPushNotificationConfig = (cfg: legacy.TaskPushNotificationConfig): unknown => {
-    return LegacyProtoTaskPushNotificationConfig.toJSON(ToProto.taskPushNotificationConfig(cfg));
+    return toSnakeCaseKeys(
+      LegacyProtoTaskPushNotificationConfig.toJSON(ToProto.taskPushNotificationConfig(cfg))
+    );
   };
 
   const encodeAgentCard = (card: legacy.AgentCard): unknown => {
-    return LegacyProtoAgentCard.toJSON(ToProto.agentCard(card));
+    return toSnakeCaseKeys(LegacyProtoAgentCard.toJSON(ToProto.agentCard(card)));
   };
 
   const encodeListTaskPushNotificationConfigs = (
     configs: legacy.TaskPushNotificationConfig[]
   ): unknown => {
-    return LegacyProtoListTaskPushNotificationConfigResponse.toJSON({
-      configs: configs.map((c) => ToProto.taskPushNotificationConfig(c)),
-      nextPageToken: '',
-    });
+    return toSnakeCaseKeys(
+      LegacyProtoListTaskPushNotificationConfigResponse.toJSON({
+        configs: configs.map((c) => ToProto.taskPushNotificationConfig(c)),
+        nextPageToken: '',
+      })
+    );
   };
 
   const decodeSendMessageRequest = (rawBody: unknown): legacy.MessageSendParams => {
@@ -213,7 +252,7 @@ export function legacyRestRouter(options: LegacyRestHandlerOptions): RequestHand
     if (!proto) {
       throw LegacyA2AError.internalError('Stream produced an unrepresentable event.');
     }
-    return LegacyProtoStreamResponse.toJSON(proto);
+    return toSnakeCaseKeys(LegacyProtoStreamResponse.toJSON(proto));
   };
 
   /**
