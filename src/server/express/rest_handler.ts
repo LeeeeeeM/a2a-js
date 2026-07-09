@@ -344,30 +344,23 @@ export function restHandler(options: RestHandlerOptions): RequestHandler {
   );
 
   /**
-   * GET /v1/tasks/:taskId
+   * GET/POST /v1/tasks/:taskId:subscribe
    *
-   * Retrieves the current status and details of a task.
+   * Resubscribes to an existing task's updates via Server-Sent Events (SSE).
+   * Useful for reconnecting to long-running tasks or receiving missed updates.
    *
    * @param req.params.taskId - Task identifier
-   * @param req.query.historyLength - Optional number of history messages to include
-   * @returns 200 OK with RestTask
-   * @returns 400 Bad Request if historyLength is invalid
+   * @returns 200 OK with SSE stream of task status and artifact updates
    * @returns 404 Not Found if task doesn't exist
+   * @returns 400 Bad Request if streaming is not supported
    */
-  router.get(
-    '/v1/tasks/:taskId',
-    asyncHandler(async (req, res) => {
-      const context = await buildContext(req);
-      const result = await restTransportHandler.getTask(
-        req.params.taskId,
-        context,
-        //TODO: clarify for version 1.0.0 the format of the historyLength query parameter, and if history should always be added to the returned object
-        req.query.historyLength ?? req.query.history_length
-      );
-      const protoResult = ToProto.task(result);
-      sendResponse<a2a.Task>(res, HTTP_STATUS.OK, context, protoResult, a2a.Task);
-    })
-  );
+  const resubscribeHandler = asyncHandler(async (req, res) => {
+    const context = await buildContext(req);
+    const stream = await restTransportHandler.resubscribe(req.params.taskId, context);
+    await sendStreamResponse(res, stream, context);
+  });
+  router.get('/v1/tasks/:taskId\\:subscribe', resubscribeHandler);
+  router.post('/v1/tasks/:taskId\\:subscribe', resubscribeHandler);
 
   /**
    * POST /v1/tasks/:taskId:cancel
@@ -391,22 +384,28 @@ export function restHandler(options: RestHandlerOptions): RequestHandler {
   );
 
   /**
-   * POST /v1/tasks/:taskId:subscribe
+   * GET /v1/tasks/:taskId
    *
-   * Resubscribes to an existing task's updates via Server-Sent Events (SSE).
-   * Useful for reconnecting to long-running tasks or receiving missed updates.
+   * Retrieves the current status and details of a task.
    *
    * @param req.params.taskId - Task identifier
-   * @returns 200 OK with SSE stream of task status and artifact updates
+   * @param req.query.historyLength - Optional number of history messages to include
+   * @returns 200 OK with RestTask
+   * @returns 400 Bad Request if historyLength is invalid
    * @returns 404 Not Found if task doesn't exist
-   * @returns 501 Not Implemented if streaming not supported
    */
-  router.post(
-    '/v1/tasks/:taskId\\:subscribe',
+  router.get(
+    '/v1/tasks/:taskId',
     asyncHandler(async (req, res) => {
       const context = await buildContext(req);
-      const stream = await restTransportHandler.resubscribe(req.params.taskId, context);
-      await sendStreamResponse(res, stream, context);
+      const result = await restTransportHandler.getTask(
+        req.params.taskId,
+        context,
+        //TODO: clarify for version 1.0.0 the format of the historyLength query parameter, and if history should always be added to the returned object
+        req.query.historyLength ?? req.query.history_length
+      );
+      const protoResult = ToProto.task(result);
+      sendResponse<a2a.Task>(res, HTTP_STATUS.OK, context, protoResult, a2a.Task);
     })
   );
 
