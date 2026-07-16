@@ -61,12 +61,38 @@ export function formatSSEErrorEvent(error: unknown): string {
 // ============================================================================
 
 /**
+ * Upper bound on how large a single unterminated line or a single SSE event
+ * may grow before {@link parseSseStream} aborts. Measured in UTF-16 code
+ * units (JS string length), which equals byte length for ASCII payloads such
+ * as JSON-encoded events; memory stays bounded within a small constant
+ * factor of this value either way.
+ *
+ * A2A clients stream from remote, potentially untrusted agent servers.
+ * Without this cap a malicious or broken server can stream bytes that never
+ * form a complete line — or `data:` lines whose blank-line terminator never
+ * arrives — growing an in-memory buffer without limit until the client
+ * process exhausts memory (CWE-400, uncontrolled resource consumption).
+ *
+ * Realistic A2A events (Message/Task JSON) are KB-scale, and large files
+ * should be referenced via `FileWithUri` parts rather than inlined, so the
+ * 4 MiB default (matching gRPC's default max message size) leaves ample
+ * headroom. Callers that must inline larger payloads can raise it via the
+ * `maxEventSizeBytes` argument.
+ */
+export const DEFAULT_MAX_SSE_EVENT_SIZE_BYTES = 4 * 1024 * 1024; // 4 MiB
+
+/**
  * Parses an SSE stream from a `Response`, yielding events as they arrive.
  * Expects well-formed SSE events with single-line JSON data, matching the
  * format produced by {@link formatSSEEvent} and {@link formatSSEErrorEvent}.
+ *
+ * @param maxEventSizeBytes - Aborts the stream if a single line or event
+ *   exceeds this size, bounding memory against a hostile server. Defaults to
+ *   {@link DEFAULT_MAX_SSE_EVENT_SIZE_BYTES}.
  */
 export async function* parseSseStream(
-  response: Response
+  response: Response,
+  maxEventSizeBytes: number = DEFAULT_MAX_SSE_EVENT_SIZE_BYTES
 ): AsyncGenerator<SseEvent, void, undefined> {
   if (!response.body) {
     throw new Error('SSE response body is undefined. Cannot read stream.');
@@ -83,6 +109,9 @@ export async function* parseSseStream(
     let lineEndIndex: number;
 
     while ((lineEndIndex = buffer.indexOf('\n')) >= 0) {
+      if (lineEndIndex > maxEventSizeBytes) {
+        throw sseSizeError('SSE line', maxEventSizeBytes);
+      }
       // Per the SSE spec lines may end with `\r\n`, `\r`, or `\n`. We
       // strip a trailing `\r` explicitly rather than calling `.trim()`,
       // which would also eat whitespace inside JSON-formatted `data:`
@@ -108,7 +137,16 @@ export async function* parseSseStream(
         // so append instead of overwriting.
         const fieldValue = stripOptionalLeadingSpace(line.substring('data:'.length));
         eventData = eventData === '' ? fieldValue : `${eventData}\n${fieldValue}`;
+        if (eventData.length > maxEventSizeBytes) {
+          throw sseSizeError('SSE event data', maxEventSizeBytes);
+        }
       }
+    }
+
+    // Same cap for a line that never terminates: the loop above never runs,
+    // so the residual buffer would otherwise grow without bound.
+    if (buffer.length > maxEventSizeBytes) {
+      throw sseSizeError('SSE line', maxEventSizeBytes);
     }
   }
 
@@ -116,6 +154,13 @@ export async function* parseSseStream(
   if (eventData) {
     yield { type: eventType, data: eventData };
   }
+}
+
+function sseSizeError(what: string, maxEventSizeBytes: number): Error {
+  return new Error(
+    `${what} exceeded the maximum allowed size of ${maxEventSizeBytes} bytes. ` +
+      `Pass maxEventSizeBytes to raise the limit, or prefer FileWithUri parts for large payloads.`
+  );
 }
 
 /**
