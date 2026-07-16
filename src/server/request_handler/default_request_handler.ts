@@ -142,10 +142,13 @@ export class DefaultRequestHandler implements A2ARequestHandler {
   }
 
   private async _createRequestContext(
-    incomingMessage: Message,
-    context: ServerCallContext,
-    requestMetadata?: Record<string, unknown>
+    request: SendMessageRequest,
+    context: ServerCallContext
   ): Promise<RequestContext> {
+    const incomingMessage = request.message;
+    if (!incomingMessage) {
+      throw new RequestMalformedError('request.message is required.');
+    }
     let task: Task | undefined;
     let referenceTasks: Task[] | undefined;
 
@@ -221,15 +224,13 @@ export class DefaultRequestHandler implements A2ARequestHandler {
       contextId,
       taskId,
     };
-    return new RequestContext(
-      messageForContext,
-      taskId,
-      contextId,
-      context,
-      task,
-      referenceTasks,
-      requestMetadata
-    );
+    // Rebuild the request with the enriched message so downstream
+    // consumers see the resolved task/context IDs on `userMessage`.
+    const resolvedRequest: SendMessageRequest = {
+      ...request,
+      message: messageForContext,
+    };
+    return new RequestContext(resolvedRequest, taskId, contextId, context, task, referenceTasks);
   }
 
   private async _processEvents(
@@ -571,11 +572,7 @@ export class DefaultRequestHandler implements A2ARequestHandler {
     const resultManager = new ResultManager(this.taskStore, context);
     resultManager.setContext(incomingMessage);
 
-    const requestContext = await this._createRequestContext(
-      incomingMessage,
-      context,
-      params.metadata
-    );
+    const requestContext = await this._createRequestContext(params, context);
     const taskId = requestContext.taskId;
     const finalMessageForAgent = requestContext.userMessage;
 
@@ -669,11 +666,7 @@ export class DefaultRequestHandler implements A2ARequestHandler {
     const resultManager = new ResultManager(this.taskStore, context);
     resultManager.setContext(incomingMessage);
 
-    const requestContext = await this._createRequestContext(
-      incomingMessage,
-      context,
-      params.metadata
-    );
+    const requestContext = await this._createRequestContext(params, context);
     const taskId = requestContext.taskId;
 
     const eventBus = this.eventBusManager.createOrGetByTaskId(taskId);

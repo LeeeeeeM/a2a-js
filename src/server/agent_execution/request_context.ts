@@ -1,36 +1,40 @@
-import { Message, Task } from '../../index.js';
+import { Message, SendMessageRequest, Task } from '../../index.js';
 import { ServerCallContext } from '../context.js';
 
+/**
+ * Holds information about the current request being processed by the server.
+ *
+ * Wraps the incoming {@link SendMessageRequest} so agent executors can reach
+ * the full payload (message, configuration, metadata, tenant) via `request`.
+ */
 export class RequestContext {
-  public readonly userMessage: Message;
+  public readonly request: SendMessageRequest;
   public readonly taskId: string;
   public readonly contextId: string;
+  public readonly context: ServerCallContext;
   public readonly task?: Task;
   public readonly referenceTasks?: Task[];
-  public readonly context: ServerCallContext;
-  /**
-   * The request-level metadata from the originating `SendMessageRequest`,
-   * when provided. This is the spec's "flexible key-value map for passing
-   * additional context or parameters" and is distinct from
-   * `userMessage.metadata`.
-   */
-  public readonly metadata?: Record<string, unknown>;
 
   constructor(
-    userMessage: Message,
+    request: SendMessageRequest,
     taskId: string,
     contextId: string,
     context: ServerCallContext,
     task?: Task,
-    referenceTasks?: Task[],
-    metadata?: Record<string, unknown>
+    referenceTasks?: Task[]
   ) {
-    this.userMessage = userMessage;
+    if (!request.message) {
+      throw new Error('RequestContext requires request.message to be set.');
+    }
+    this.request = structuredClone(request);
     this.taskId = taskId;
     this.contextId = contextId;
     this.context = context;
     this.task = task;
     this.referenceTasks = referenceTasks;
-    this.metadata = metadata ? structuredClone(metadata) : undefined;
+  }
+
+  get userMessage(): Message {
+    return this.request.message!;
   }
 }
