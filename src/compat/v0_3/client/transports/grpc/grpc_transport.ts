@@ -17,16 +17,12 @@
 
 import * as grpc from '@grpc/grpc-js';
 import { TransportProtocolName } from '../../../../../core.js';
-import {
-  A2A_REASON_TO_ERROR_CLASS,
-  ERROR_INFO_TYPE,
-  UnsupportedOperationError,
-} from '../../../../../errors.js';
+import { UnsupportedOperationError } from '../../../../../errors/index.js';
+import { fromGrpcError } from '../../../../../errors/grpc/index.js';
 import { A2A_LEGACY_PROTOCOL_VERSION } from '../../../../../constants.js';
 import type { SendMessageResult } from '../../../../../index.js';
 import type { RequestOptions } from '../../../../../client/multitransport-client.js';
 import type { Transport } from '../../../../../client/transports/transport.js';
-import { decodeErrorInfo, decodeStatus } from '../../../../../server/grpc/error_details.js';
 import {
   A2AServiceClient,
   type CreateTaskPushNotificationConfigRequest,
@@ -331,7 +327,7 @@ export class LegacyGrpcTransport implements Transport {
             options.signal.removeEventListener('abort', onAbort);
           }
           if (error) {
-            return reject(LegacyGrpcTransport._mapToError(error, method));
+            return reject(fromGrpcError(error, method));
           }
           try {
             resolve(converter(response));
@@ -376,7 +372,7 @@ export class LegacyGrpcTransport implements Transport {
       }
     } catch (error) {
       if (LegacyGrpcTransport._isServiceError(error)) {
-        throw LegacyGrpcTransport._mapToError(error, method);
+        throw fromGrpcError(error, method);
       }
       throw new Error(`GRPC error for ${String(method)}!`, { cause: error });
     } finally {
@@ -418,43 +414,5 @@ export class LegacyGrpcTransport implements Transport {
       result,
     };
     return toCoreStreamResponse(envelope);
-  }
-
-  /**
-   * Decodes `google.rpc.ErrorInfo` from `grpc-status-details-bin` when
-   * present (this SDK's `legacyGrpcService` emits it); otherwise returns
-   * a generic `Error` preserving the gRPC code and details.
-   */
-  private static _mapToError(error: grpc.ServiceError, method?: string): Error {
-    const fromErrorInfo = LegacyGrpcTransport._mapFromErrorInfo(error);
-    if (fromErrorInfo) return fromErrorInfo;
-
-    const methodContext = method ? ' for ' + method : '';
-    return new Error('gRPC error' + methodContext + ': ' + error.code + ' ' + error.details, {
-      cause: error,
-    });
-  }
-
-  private static _mapFromErrorInfo(error: grpc.ServiceError): Error | undefined {
-    const bin = error.metadata?.get('grpc-status-details-bin');
-    if (!bin || bin.length === 0) return undefined;
-
-    const raw = bin[0];
-    const buffer = Buffer.isBuffer(raw) ? raw : Buffer.from(raw, 'binary');
-
-    const status = decodeStatus(buffer);
-
-    for (const detail of status.details) {
-      if (detail.typeUrl === ERROR_INFO_TYPE) {
-        const errorInfo = decodeErrorInfo(detail.value);
-
-        const ErrorClass = A2A_REASON_TO_ERROR_CLASS[errorInfo.reason];
-        if (!ErrorClass) return undefined;
-
-        return new ErrorClass(error.details);
-      }
-    }
-
-    return undefined;
   }
 }

@@ -2,18 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { toCompatErrorBody } from '../../../../src/compat/v0_3/translate/errors.js';
 import { A2AError as LegacyA2AError } from '../../../../src/compat/v0_3/server/error.js';
 import {
+  A2AError,
   ContentTypeNotSupportedError,
   ExtendedAgentCardNotConfiguredError,
   ExtensionSupportRequiredError,
-  GenericError,
   InvalidAgentResponseError,
+  JsonRpcRequestMalformedError,
   PushNotificationNotSupportedError,
   RequestMalformedError,
   TaskNotCancelableError,
   TaskNotFoundError,
   UnsupportedOperationError,
   VersionNotSupportedError,
-} from '../../../../src/errors.js';
+} from '../../../../src/errors/index.js';
 
 const v1ToLegacyCodeCases: ReadonlyArray<readonly [() => Error, number]> = [
   [() => new TaskNotFoundError('a'), -32001],
@@ -30,7 +31,7 @@ const v1ToLegacyCodeCases: ReadonlyArray<readonly [() => Error, number]> = [
   // SDK-internal classes (not part of the spec but raised by the SDK
   // when validating requests / wrapping arbitrary throws).
   [() => new RequestMalformedError('a'), -32602],
-  [() => new GenericError('a'), -32603],
+  [() => new A2AError('a'), -32603],
 ];
 
 describe('compat/v0_3/translate/errors - toCompatErrorBody', () => {
@@ -41,8 +42,14 @@ describe('compat/v0_3/translate/errors - toCompatErrorBody', () => {
     expect(out.message).toContain('t-1');
   });
 
-  it('preserves the data field from a LegacyA2AError', () => {
-    const err = LegacyA2AError.invalidParams('boom', { hint: 'check x' });
+  it('preserves the data field from a JsonRpc*Error', () => {
+    // Callers that need to attach `data` build a `JsonRpc*Error`
+    // directly rather than using the LegacyA2AError facade.
+    const err = new JsonRpcRequestMalformedError({
+      message: 'boom',
+      envelopeCode: -32602,
+      data: { hint: 'check x' },
+    });
     const out = toCompatErrorBody(err);
     expect(out.code).toBe(-32602);
     expect(out.message).toBe('boom');

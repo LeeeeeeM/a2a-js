@@ -24,8 +24,7 @@ import { RequestOptions } from '../../multitransport-client.js';
 import { Transport, TransportFactory } from '../transport.js';
 import { FromProto } from '../../../types/converters/from_proto.js';
 
-import { A2A_REASON_TO_ERROR_CLASS, ERROR_INFO_TYPE } from '../../../errors.js';
-import { decodeStatus, decodeErrorInfo } from '../../../server/grpc/error_details.js';
+import { fromGrpcError } from '../../../errors/grpc/index.js';
 import { LegacyGrpcTransport } from '../../../compat/v0_3/client/transports/grpc/index.js';
 import { isLegacyVersion } from '../../../version_utils.js';
 import { pickMatchingInterface } from '../pick_interface.js';
@@ -232,7 +231,7 @@ export class GrpcTransport implements Transport {
             options.signal.removeEventListener('abort', onAbort);
           }
           if (error) {
-            return reject(GrpcTransport.mapToError(error, method));
+            return reject(fromGrpcError(error, method));
           }
           resolve(converter(response));
         }
@@ -282,7 +281,7 @@ export class GrpcTransport implements Transport {
       }
     } catch (error) {
       if (this.isServiceError(error)) {
-        throw GrpcTransport.mapToError(error, method);
+        throw fromGrpcError(error, method);
       } else {
         throw new Error(`GRPC error for ${String(method)}!`, {
           cause: error,
@@ -308,45 +307,6 @@ export class GrpcTransport implements Transport {
       }
     }
     return metadata;
-  }
-
-  private static mapFromErrorInfo(error: grpc.ServiceError): Error | undefined {
-    const bin = error.metadata?.get('grpc-status-details-bin');
-    if (!bin || bin.length === 0) return undefined;
-
-    const raw = bin[0];
-    const buffer = Buffer.isBuffer(raw) ? raw : Buffer.from(raw, 'binary');
-
-    const status = decodeStatus(buffer);
-
-    for (const detail of status.details) {
-      if (detail.typeUrl === ERROR_INFO_TYPE) {
-        const errorInfo = decodeErrorInfo(detail.value);
-
-        const ErrorClass = A2A_REASON_TO_ERROR_CLASS[errorInfo.reason];
-        if (!ErrorClass) return undefined;
-
-        return new ErrorClass(error.details);
-      }
-    }
-
-    return undefined;
-  }
-
-  /**
-   * Maps a gRPC `ServiceError` to an SDK error class via
-   * `google.rpc.ErrorInfo` from `grpc-status-details-bin` metadata.
-   * Falls back to a generic `Error` carrying the gRPC code and details
-   * when no ErrorInfo is present.
-   */
-  private static mapToError(error: grpc.ServiceError, method?: keyof A2AServiceClient): Error {
-    const fromErrorInfo = GrpcTransport.mapFromErrorInfo(error);
-    if (fromErrorInfo) return fromErrorInfo;
-
-    const methodContext = method ? ' for ' + String(method) : '';
-    return new Error('gRPC error' + methodContext + ': ' + error.code + ' ' + error.details, {
-      cause: error,
-    });
   }
 }
 

@@ -15,11 +15,9 @@
  * `tasks/list`.
  */
 
-import {
-  InvalidAgentResponseError,
-  mapA2aErrorToSdkError,
-  UnsupportedOperationError,
-} from '../../../../errors.js';
+import { A2A_ERROR_CLASSES } from '../../../../errors/base.js';
+import { JSON_RPC_CODE_TO_ERROR } from '../../../../errors/json_rpc.js';
+import { InvalidAgentResponseError, UnsupportedOperationError } from '../../../../errors/index.js';
 import type { TransportProtocolName } from '../../../../core.js';
 import type { SendMessageResult } from '../../../../index.js';
 import type { RequestOptions } from '../../../../client/multitransport-client.js';
@@ -421,10 +419,7 @@ export class LegacyRestTransport implements Transport {
     try {
       const parsed = JSON.parse(jsonData) as unknown;
       if (LegacyRestTransport._isLegacyRestErrorBody(parsed)) {
-        return mapA2aErrorToSdkError(parsed, () => {
-          const dataSuffix = parsed.data ? ` Data: ${JSON.stringify(parsed.data)}` : '';
-          return new Error(`REST error: ${parsed.message} (Code: ${parsed.code})${dataSuffix}`);
-        });
+        return LegacyRestTransport._errorFromLegacyBody(parsed);
       }
       return new Error(`SSE error event: ${jsonData}`);
     } catch {
@@ -450,16 +445,24 @@ export class LegacyRestTransport implements Transport {
     }
 
     if (errorBody) {
-      const body = errorBody;
-      throw mapA2aErrorToSdkError(body, () => {
-        const dataSuffix = body.data ? ` Data: ${JSON.stringify(body.data)}` : '';
-        return new Error(`REST error: ${body.message} (Code: ${body.code})${dataSuffix}`);
-      });
+      throw LegacyRestTransport._errorFromLegacyBody(errorBody);
     }
 
     throw new Error(
       `HTTP error for ${path}! Status: ${response.status} ${response.statusText}. Response: ${errorBodyText}`
     );
+  }
+
+  /**
+   * Reconstructs a semantic SDK error from a v0.3 error body. Unknown
+   * codes fall through to a generic `Error` preserving the code/data
+   * in the message for debugging.
+   */
+  private static _errorFromLegacyBody(body: LegacyRestErrorBody): Error {
+    const name = JSON_RPC_CODE_TO_ERROR[body.code];
+    if (name) return new A2A_ERROR_CLASSES[name]({ message: body.message });
+    const dataSuffix = body.data ? ` Data: ${JSON.stringify(body.data)}` : '';
+    return new Error(`REST error: ${body.message} (Code: ${body.code})${dataSuffix}`);
   }
 
   private static _isLegacyRestErrorBody(value: unknown): value is LegacyRestErrorBody {
